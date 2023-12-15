@@ -1,0 +1,281 @@
+---
+title: "Signal v. Noise: Examining the Copper-to-Gold Ratio as a Predictor of Treasury Yield Curve Shifts"
+author: "Brandon Kaplan"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(zoo)
+library(tseries)
+library(vars)
+```
+
+```{r data cleaning}
+# Setting Up Environment Variables --------------------------------------------- 
+
+T10Y2Y <- Sys.getenv("T10Y2Y_path")
+gold_daily <- Sys.getenv("gold_path")
+copper_monthly <- Sys.getenv("copper_path")
+
+# Loading Data -----------------------------------------------------------------
+
+yield_data <- read_csv(T10Y2Y)
+gold_data <- read_csv(gold_daily)
+copper_data <- read_csv2(copper_monthly)
+
+# Formatting Data --------------------------------------------------------------
+
+yield_data <- yield_data %>%
+  mutate(T10Y2Y = as.numeric(T10Y2Y))
+yield_data <- na.omit(yield_data)
+yield_data <- yield_data[-347, ]
+yield_data <- rename(yield_data, "Date" = "DATE",
+                     "Spread" = "T10Y2Y")
+
+
+gold_data <- rename(gold_data, "Spot" = "XAU= (BID)")
+gold_data <- gold_data %>%
+  mutate(Spot = as.numeric(Spot))
+gold_data <- na.omit(gold_data)
+gold_data <- gold_data[nrow(gold_data):1, ]
+gold_data <- gold_data[-7505:-7526, ]
+gold_data$Date <- as.Date(gold_data$Date, format = "%d-%b-%y")
+
+
+copper_data <- rename(copper_data, "Date" = "Label",
+                     "Spot" = "Copper – Grade A – LME (London Metal Exchange) spot price – Price in dollars per metric ton")
+copper_data <- copper_data %>%
+  mutate(Spot = as.numeric(Spot))
+copper_data <- copper_data[-1:-4, ]
+copper_data <- copper_data[, -3]
+copper_data <- copper_data[nrow(copper_data):1, ]
+copper_data$Date <- as.Date(paste0(copper_data$Date, "-01"))
+
+```
+
+```{r copper-to-gold ratio}
+# Convert Copper Spot Price from Per Metric Ton to Per Pound ------------------- 
+
+copper_data$Spot <- copper_data$Spot / 2204.62 # 2204.62 pounds in one metric ton
+
+# Compute Average Monthly Gold Spot --------------------------------------------
+
+gold_data$YearMonth <- floor_date(gold_data$Date, "month") # Year-Month column
+
+gold_data <- gold_data %>%
+  group_by(YearMonth) %>%
+  summarise(Avg_Spot = mean(Spot, na.rm = TRUE)) %>% # Mean Spot/Year-Month
+  ungroup()
+
+gold_data$Date <- as.Date(paste(year(gold_data$YearMonth),
+                                        month(gold_data$YearMonth),
+                                        "01", sep = "-")) # New date column
+gold_data <- gold_data %>%
+  dplyr::select(Date, Avg_Spot) # Select only relevant columns
+
+# Compute Copper-to-Gold Ratio -------------------------------------------------
+
+copper_to_gold_ratio <- copper_data$Spot / gold_data$Avg_Spot
+
+copper_to_gold_ratio <- data.frame(
+  Date = copper_data$Date,
+  Ratio = copper_to_gold_ratio # Create new dataframe for copper-to-gold ratio
+) 
+
+```
+
+```{r time series analysis}
+
+# Create Recessions Data Frame -------------------------------------------------
+
+recession_periods <- data.frame(
+  Recession = c("Dot-com Bubble", "Great Recession", "COVID-19 Pandemic"),
+  Start = as.Date(c("2001-03-01", "2007-12-01", "2020-02-01")), # Approximate
+  End = as.Date(c("2001-11-30", "2009-06-30", "2020-04-30"))    # Approximate
+)
+
+# Calculate Rolling Mean with 12 Month Window For The Moving Average -----------
+
+copper_to_gold_ratio$RollingMean <- rollmean(copper_to_gold_ratio$Ratio, 12, fill = NA)
+
+# Plot -------------------------------------------------------------------------
+
+ggplot(copper_to_gold_ratio, aes(x = Date)) +
+  geom_line(aes(y = Ratio, color = "Copper-to-Gold Ratio"), size = 1) +
+  geom_line(aes(y = RollingMean, color = "Rolling Average"), size = 1, linetype = "dashed") +
+  geom_rect(data = recession_periods, aes(xmin = Start, xmax = End, ymin = -Inf, ymax = Inf, fill = "Recession"), 
+            alpha = 0.5, inherit.aes = FALSE) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  scale_color_manual(values = c("Copper-to-Gold Ratio" = "blue", "Rolling Average" = "red")) +
+  scale_fill_manual(values = c("Recession" = "slategrey"), guide = guide_legend(override.aes = list(alpha = 0.5))) +
+  labs(
+    title = "Copper-to-Gold Ratio Over Time",
+    x = "Date",
+    y = "Ratio",
+    color = "Indicator",
+    fill = ""
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 20),
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1),
+    axis.title.x = element_text(margin = margin(t = 20)),
+    panel.background = element_rect(fill = "grey70"),
+    legend.background = element_rect(fill = "white"),
+    legend.box.background = element_rect(color = "white"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(5.5, 40, 40, 5.5)
+  ) +
+  guides(
+    color = guide_legend(title = "Lines"),
+    fill = guide_legend(title = "Recession Periods")
+    ) 
+```
+```{r split data}
+
+# Splitting The Data Into Test and Training Sets -------------------------------
+cut_off_date <- as.Date("2018-12-31")
+
+
+train_copper_to_gold_ratio <- copper_to_gold_ratio[copper_to_gold_ratio$Date <= cut_off_date, ]
+test_copper_to_gold_ratio <- copper_to_gold_ratio[copper_to_gold_ratio$Date > cut_off_date, ]
+
+
+train_yield_data <- yield_data[yield_data$Date <= cut_off_date, ]
+test_yield_data <- yield_data[yield_data$Date > cut_off_date, ]
+
+```
+
+```{r preparation for vector autoregression}
+
+# Differencing The Training Data -----------------------------------------------
+
+train_copper_to_gold_ratio_diff <- diff(train_copper_to_gold_ratio$Ratio)
+train_yield_data_diff <- diff(train_yield_data$Spread)
+
+var_model_data <- data.frame(
+  Date = train_copper_to_gold_ratio$Date[-1],  # Exclude the first date 
+  diff_Ratio = train_copper_to_gold_ratio_diff,
+  diff_Spread = train_yield_data_diff
+)
+
+var_model_data <- na.omit(var_model_data)
+
+# ADF Test To Confirm Stationarity ---------------------------------------------
+
+adf.test(var_model_data$diff_Ratio, alternative = "stationary")
+adf.test(var_model_data$diff_Spread, alternative = "stationary")
+
+```
+
+```{r vector autoregression}
+
+var_model_numeric_data <- var_model_data[, c("diff_Ratio", "diff_Spread")]
+
+# Select Optimal Lag -----------------------------------------------------------
+
+lag_selection <- VARselect(var_model_numeric_data, lag.max = 12, type = "both")
+print(lag_selection)
+optimal_lag <- (lag_selection$selection["AIC(n)"])
+print(paste("Optimal lag according to AIC:", optimal_lag))
+
+# Fit VAR ----------------------------------------------------------------------
+
+var_model <- VAR(var_model_numeric_data, p = optimal_lag, type = "both")
+summary(var_model)
+
+```
+```{r granger causality}
+
+# Granger Causality Test -------------------------------------------------------
+
+granger_test <- causality(var_model, cause = "diff_Ratio")
+print(granger_test)
+
+```
+
+```{r impulse response analysis}
+
+# Impulse Response Analysis ----------------------------------------------------
+
+irf_results <- irf(var_model, n.ahead = 20, boot = TRUE)
+plot(irf_results)
+
+```
+
+```{r forecast error variance decomposition}
+
+# Forecast Error Variance Decomposition ----------------------------------------
+
+fevd_results <- fevd(var_model, n.ahead = 20)
+plot(fevd_results)
+
+```
+
+```{r out-of-sample forecast}
+
+# Differecing Test Data --------------------------------------------------------
+
+test_copper_to_gold_ratio_diff <- diff(test_copper_to_gold_ratio$Ratio)
+test_dates_adjusted <- test_copper_to_gold_ratio$Date[-1]
+
+test_yield_data_diff <- diff(test_yield_data$Spread)
+
+# Generate Forecasts and Extract -----------------------------------------------
+
+n_forecast_steps <- length(test_copper_to_gold_ratio_diff)
+forecasts <- predict(var_model, n.ahead = n_forecast_steps)
+forecast_values_ratio <- forecasts$fcst$diff_Ratio[, "fcst"]  
+forecast_values_spread <- forecasts$fcst$diff_Spread[, "fcst"]
+
+# Plotting Ratio ---------------------------------------------------------------
+
+plot(test_dates_adjusted, test_copper_to_gold_ratio_diff, type = "l", col = "blue",
+     ylim = range(c(forecast_values_ratio, test_copper_to_gold_ratio_diff)), xlab = "Date",
+     ylab = "Differenced Ratio")
+lines(test_dates_adjusted, forecast_values_ratio, col = "red", lty = 2)
+legend("topright", legend = c("Actual", "Forecast"), col = c("blue", "red"), lty = 1:2)
+
+# Plotting Spread --------------------------------------------------------------
+plot(test_dates_adjusted, test_yield_data_diff, type = "l", col = "blue",
+     ylim = range(c(forecast_values_ratio, test_yield_data_diff)), xlab = "Date",
+     ylab = "Differenced Spread")
+lines(test_dates_adjusted, forecast_values_spread, col = "red", lty = 2)
+legend("topright", legend = c("Actual", "Forecast"), col = c("blue", "red"), lty = 1:2)
+```
+
+```{r forecast metrics}
+
+# Mean Absolute Error ----------------------------------------------------------
+
+mae_ratio <- mean(abs(test_copper_to_gold_ratio_diff - forecast_values_ratio))
+mae_spread <- mean(abs(test_yield_data_diff - forecast_values_spread))
+
+# Root Mean Squared Error ------------------------------------------------------
+
+rmse_ratio <- sqrt(mean((test_copper_to_gold_ratio_diff - forecast_values_ratio)^2))
+rmse_spread <- sqrt(mean((test_yield_data_diff - forecast_values_spread)^2))
+
+# Mean Absolute Percentage Error -----------------------------------------------
+
+mape_ratio <- mean(abs((test_copper_to_gold_ratio_diff - forecast_values_ratio) / test_copper_to_gold_ratio_diff)) * 100
+mape_spread <- mean(abs((test_yield_data_diff - forecast_values_spread) / test_yield_data_diff)) * 100
+
+print(paste("MAE Ratio:", mae_ratio))
+print(paste("MAE Spread:", mae_spread))
+print(paste("RSME Ratio", rmse_ratio))
+print(paste("RSME Spread", rmse_spread))
+print(paste("MAPE Ratio", mape_ratio))
+print(paste("MAPE Spread", mape_spread))
+
+```
